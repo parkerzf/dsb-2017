@@ -28,7 +28,7 @@ from neon import NervanaObject
 class ChunkLoader(NervanaObject):
     def __init__(self, set_name, repo_dir, datum_dtype=np.uint8,
                  nclasses=2, augment=False, test_mode=False):
-        assert test_mode is False, 'Test mode not implemented yet'
+        # assert test_mode is False, 'Test mode not implemented yet'
         super(ChunkLoader, self).__init__()
         np.random.seed(0)
         self.reset()
@@ -46,27 +46,33 @@ class ChunkLoader(NervanaObject):
         # Load this many videos at a time
         self.vids_per_macrobatch = 128
         # Extract this many chunks from each video
-        self.chunks_per_vid = 128
+        if not test_mode:
+            self.chunks_per_vid = 128
+        else:
+            self.chunks_per_vid = settings.chunks_per_dim ** 3
         self.macrobatch_offset = 0
         self.chunks_left_in_macrobatch = 0
-        self.macrobatch_size = self.vids_per_macrobatch*self.chunks_per_vid
+        self.macrobatch_size = self.vids_per_macrobatch * self.chunks_per_vid
 
-        self.ndata = self.nvids*self.chunks_per_vid
-        self.labels = pd.read_csv(os.path.join(self.repo_dir, 'labels.csv'))
-        # Host buffers for macrobatch data and targets
+        self.ndata = self.nvids * self.chunks_per_vid
+        if not test_mode:
+            self.labels = pd.read_csv(os.path.join(self.repo_dir, 'labels.csv'))
+        else:
+            self.labels = None
+            # Host buffers for macrobatch data and targets
         self.data = np.empty((self.macrobatch_size, self.chunk_volume), dtype=datum_dtype)
         self.targets = np.empty((self.macrobatch_size, nclasses), dtype=np.float32)
         self.minibatch_data = np.empty((self.bsz, self.chunk_volume), dtype=datum_dtype)
         self.minibatch_targets = np.empty((self.bsz, nclasses), dtype=np.float32)
         self.test_mode = test_mode
-        self.chunk_count = 0
+        # self.chunk_count = 0
         self.shape = (1, self.chunk_size, self.chunk_size, self.chunk_size)
 
         self.transform_buffer = np.empty(self.chunk_shape, dtype=datum_dtype)
         # Device buffers for minibatch data and targets
         self.dev_data = self.be.empty((self.chunk_volume, self.bsz), dtype=self.be.default_dtype)
         self.dev_targets = self.be.empty((nclasses, self.bsz), dtype=self.be.default_dtype)
-        self.current_flag = self.current_meta = None
+        self.current_uid = self.current_flag = self.current_meta = None
 
     def reset(self):
         self.start_idx = 0
@@ -79,13 +85,14 @@ class ChunkLoader(NervanaObject):
         self.targets[:] = 0
         for idx in range(self.vids_per_macrobatch):
             vid_data = self.next_video()
-            self.chunk_count = self.chunks_per_vid
-            self.extract_chunks(vid_data, curr_idx, self.current_flag, self.chunks_per_vid)
+            # self.chunk_count = self.chunks_per_vid
+            # self.extract_chunks(vid_data, curr_idx, self.chunks_per_vid)
+            self.extract_chunks(vid_data, curr_idx)
             curr_idx += self.chunks_per_vid
             self.chunks_filled += self.chunks_per_vid
         self.chunks_left_in_macrobatch = self.macrobatch_size
-        if self.is_training:
-            self.shuffle(self.data, self.targets)
+        # if self.is_training:
+        #     self.shuffle(self.data, self.targets)
 
     def next_minibatch(self, start):
         end = min(start + self.bsz, self.ndata)
@@ -99,6 +106,10 @@ class ChunkLoader(NervanaObject):
         start = self.macrobatch_offset
         end = start + self.bsz
 
+        uid = self.metadata.iloc[int(self.macrobatch_offset / self.chunks_per_vid)]['uid']
+        # flag = self.metadata.iloc[int(self.macrobatch_offset / self.chunks_per_vid)]['flag']
+        # print uid, flag
+
         self.minibatch_data[:] = self.data[start:end]
         self.minibatch_targets[:] = self.targets[start:end]
         self.dev_data[:] = self.minibatch_data.T.copy()
@@ -106,11 +117,12 @@ class ChunkLoader(NervanaObject):
         self.dev_targets[:] = self.minibatch_targets.T.copy()
         self.macrobatch_offset += self.bsz
         self.chunks_left_in_macrobatch -= self.bsz
-        return self.dev_data, self.dev_targets
+        return uid, self.dev_data, self.dev_targets
 
     def next_video(self):
         self.current_meta = self.metadata.iloc[self.video_idx]
         uid = self.current_meta['uid']
+        self.current_uid = self.current_meta['uid']
         self.current_flag = int(self.current_meta['flag'])
         data_filename = os.path.join(self.repo_dir, uid + '.' + settings.file_ext)
         vid_shape = (int(self.current_meta['z_len']),
@@ -153,42 +165,48 @@ class ChunkLoader(NervanaObject):
         return vid
 
     def slice_chunk(self, start, data):
-        return data[start[0]:start[0]+self.chunk_size,
-                    start[1]:start[1]+self.chunk_size,
-                    start[2]:start[2]+self.chunk_size].ravel()
+        return data[start[0]:start[0] + self.chunk_size,
+               start[1]:start[1] + self.chunk_size,
+               start[2]:start[2] + self.chunk_size].ravel()
 
-    def extract_one(self, cur_idx, chunk_idx, data, data_shape, flag, uid_data):
-        assert uid_data.shape[0] != 0
-        rand = np.random.randint(8)
-        if flag == 1 or rand > 0:
-            # Could be a real nodule or a negative sample selected from
-            # possible candidates
-            i = np.random.randint(uid_data.shape[0])
-            center = np.array((uid_data['z'].iloc[i],
-                               uid_data['y'].iloc[i],
-                               uid_data['x'].iloc[i]), dtype=np.int32)
-            rad = 0.5 * uid_data['diam'].iloc[i]
-            if rad == 0:
-                # Assign an arbitrary radius to candidate nodules
-                rad = 24 / settings.resolution
-            low = np.int32(center + rad - self.chunk_size)
-            high = np.int32(center - rad)
+    def extract_one(self, cur_idx, chunk_idx, data, data_shape, uid_data):
+        # assert uid_data.shape[0] != 0
+        if not self.test_mode:
+            rand = np.random.randint(8)
+            if self.current_flag == 1 or rand > 0:
+                # Could be a real nodule or a negative sample selected from
+                # possible candidates
+                i = np.random.randint(uid_data.shape[0])
+                center = np.array((uid_data['z'].iloc[i],
+                                   uid_data['y'].iloc[i],
+                                   uid_data['x'].iloc[i]), dtype=np.int32)
+                # radius
+                rad = 0.5 * uid_data['diam'].iloc[i]
+                if rad == 0:
+                    # Assign an arbitrary radius to candidate nodules
+                    rad = 24 / settings.resolution
+                low = np.int32(center + rad - self.chunk_size)
+                high = np.int32(center - rad)
+            else:
+                # Let in a random negative sample
+                low = np.zeros(3, dtype=np.int32)
+                high = np.int32(low + data_shape - self.chunk_size)
+
+            for j in range(3):
+                low[j] = max(0, low[j])
+                high[j] = max(low[j] + 1, high[j])
+                high[j] = min(data_shape[j] - self.chunk_size, high[j])
+                low[j] = min(low[j], high[j] - 1)
+            # Jitter the location of this chunk
+            start = [np.random.randint(low=low[i], high=high[i]) for i in range(3)]
         else:
-            # Let in a random negative sample
-            low = np.zeros(3, dtype=np.int32)
-            high = np.int32(low + data_shape - self.chunk_size)
+            start = self.generate_chunk_start(chunk_idx, data_shape)
 
-        for j in range(3):
-            low[j] = max(0, low[j])
-            high[j] = max(low[j] + 1, high[j])
-            high[j] = min(data_shape[j] - self.chunk_size, high[j])
-            low[j] = min(low[j], high[j] - 1)
-        # Jitter the location of this chunk
-        start = [np.random.randint(low=low[i], high=high[i]) for i in range(3)]
         chunk = self.slice_chunk(start, data)
 
         if self.current_flag != -1:
             self.targets[cur_idx + chunk_idx, self.current_flag] = 1
+
         if self.augment:
             self.transform_buffer[:] = chunk.reshape(self.transform_buffer.shape)
             self.data[cur_idx + chunk_idx] = self.transform(self.transform_buffer).ravel()
@@ -196,16 +214,32 @@ class ChunkLoader(NervanaObject):
             self.data[cur_idx + chunk_idx] = chunk
         return True
 
-    def extract_chunks(self, data, cur_idx, flag, count):
-        assert count <= self.chunk_count
-        meta = self.current_meta
+    def generate_chunk_start(self, chunk_idx, data_shape):
+        chunk_spacing = np.int32((np.array(data_shape) - self.chunk_size) / settings.chunks_per_dim)
+        z_chunk_idx = chunk_idx / settings.chunks_per_dim ** 2
+        y_chunk_idx = (chunk_idx - z_chunk_idx * settings.chunks_per_dim ** 2) / settings.chunks_per_dim
+        x_chunk_idx = chunk_idx - z_chunk_idx * settings.chunks_per_dim ** 2 \
+                      - y_chunk_idx * settings.chunks_per_dim
+
+        start = [z_chunk_idx * chunk_spacing[0],
+                 y_chunk_idx * chunk_spacing[1],
+                 x_chunk_idx * chunk_spacing[2]]
+        return start
+
+    def extract_chunks(self, data, cur_idx):
+        # meta = self.current_meta
         data_shape = np.array(data.shape, dtype=np.int32)
 
-        uid = meta['uid']
-        uid_data = self.labels[self.labels['uid'] == uid]
+        # uid = meta['uid']
+        # uid_data = self.labels[self.labels['uid'] == uid]
+        if not self.test_mode:
+            uid_data = self.labels[self.labels['uid'] == self.current_uid]
+        else:
+            uid_data = None
+
         chunk_idx = 0
-        while chunk_idx < count:
-            if self.extract_one(cur_idx, chunk_idx, data, data_shape, flag, uid_data):
+        while chunk_idx < self.chunks_per_vid:
+            if self.extract_one(cur_idx, chunk_idx, data, data_shape, uid_data):
                 chunk_idx += 1
 
     def shuffle(self, data, targets):

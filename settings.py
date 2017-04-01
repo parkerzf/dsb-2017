@@ -22,3 +22,4 @@ high_thresh = 500
 mask_dilation = 4
 resolution = 1.0
 file_ext = 'blp'
+chunks_per_dim = 8
