@@ -221,7 +221,7 @@ def convert(path_list, annots, batch_size, max_idx, idx):
             mask.apply_mask(slices, msk)
             slices, starts = trim(slices)
             video.write_data(slices, os.path.join(output_path, uid))
-            flag = 0
+            flag = -1
             meta.loc[meta.shape[0]] = dict(uid=uid, flag=flag, z_len=slices.shape[0],
                                            y_len=slices.shape[1], x_len=slices.shape[2])
 
