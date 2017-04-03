@@ -33,6 +33,7 @@ import settings
 import video
 import mask
 
+import dicom
 
 def process_annotations(uid, annots, origin, labels, shape, starts):
     if not is_train:
@@ -79,28 +80,80 @@ def filter_cands(locs):
     return result, 1
 
 
-def read_scan(path):
-    uid = os.path.basename(path)
-    if uid.split('.')[-1] == 'mhd':
-        uid = uid[:-4]
-        return sitk.ReadImage(path), uid
+def read_scan_dicom(folder_name):
+    uid = os.path.basename(folder_name)
+    slices = [dicom.read_file(folder_name + '/' + s) for s in os.listdir(folder_name)]
+    slices.sort(key=lambda x: float(x.ImagePositionPatient[2]))
+    try:
+        slice_thickness = np.abs(slices[0].ImagePositionPatient[2] - slices[1].ImagePositionPatient[2])
+    except:
+        slice_thickness = np.abs(slices[0].SliceLocation - slices[1].SliceLocation)
 
-    reader = sitk.ImageSeriesReader()
-    image_files = reader.GetGDCMSeriesFileNames(path)
-    assert len(image_files) > 0
-    if len(image_files) < settings.chunk_size:
-        print('Ignoring %s - only %d slices' % (path, len(image_files)))
-        return None, uid
+    for s in slices:
+        s.SliceThickness = slice_thickness
 
-    reader.SetFileNames(image_files)
-    return reader.Execute(), uid
+    return slices, uid
 
 
-def get_data(scan_data):
+def get_pixels_hu_dicom(slices):
+    image = np.stack([s.pixel_array for s in slices])
+    # Convert to int16 (from sometimes int16),
+    # should be possible as values should always be low enough (<32k)
+    image = image.astype(np.int16)
+
+    # Set outside-of-scan pixels to 0
+    # The intercept is usually -1024, so air is approximately 0
+    image[image == -2000] = 0
+
+    # Convert to Hounsfield units (HU)
+    for slice_number in range(len(slices)):
+
+        intercept = slices[slice_number].RescaleIntercept
+        slope = slices[slice_number].RescaleSlope
+
+        if slope != 1:
+            image[slice_number] = slope * image[slice_number].astype(np.float64)
+            image[slice_number] = image[slice_number].astype(np.int16)
+
+        image[slice_number] += np.int16(intercept)
+
+    return np.array(image, dtype=np.int16)
+
+
+def resample_dicom(image, scan):
+    # Determine current pixel spacing
+    spacing = np.array([scan[0].SliceThickness] + scan[0].PixelSpacing, dtype=np.float32)
+
+    spacing /= settings.resolution
+    image = ndimage.interpolation.zoom(image, spacing, mode='nearest')
+
+    return image, spacing
+
+
+def read_scan_mhd(path):
+    # uid = os.path.basename(path)
+    # if uid.split('.')[-1] == 'mhd':
+    uid = os.path.basename(path)[:-4]
+    return sitk.ReadImage(path), uid
+
+
+    # reader = sitk.ImageSeriesReader()
+    # image_files = reader.GetGDCMSeriesFileNames(path)
+    # assert len(image_files) > 0
+    # if len(image_files) < settings.chunk_size:
+    #     print('Ignoring %s - only %d slices' % (path, len(image_files)))
+    #     return None, uid
+    #
+    # reader.SetFileNames(image_files)
+    # return reader.Execute(), uid
+
+
+def get_data_mhd(scan_data):
     data = sitk.GetArrayFromImage(scan_data)
     # Convert to (z, y, x) ordering
     spacing = np.array(list(reversed(scan_data.GetSpacing())))
     spacing /= settings.resolution
+
     slices = ndimage.interpolation.zoom(data, spacing, mode='nearest')
     origin = np.array(list(reversed(scan_data.GetOrigin())))
     return slices, spacing, origin
@@ -136,30 +189,42 @@ def convert(path_list, annots, batch_size, max_idx, idx):
     meta = pd.DataFrame(columns=['uid', 'flag', 'z_len', 'y_len', 'x_len'])
     labels = pd.DataFrame(columns=['uid', 'flag', 'z', 'y', 'x', 'diam', 'vol'])
     for i, path in enumerate(path_list):
-        if os.path.basename(path) == 'b8bb02d229361a623a4dc57aa0e5c485':
-            # ITK cannot read this file
-            continue
         print('Converting %s' % path)
-        scan_data, uid = read_scan(path)
-        if scan_data is None:
-            continue
 
-        slices, spacing, origin = get_data(scan_data)
-        skip = 0
+        if path.endswith('mhd'):
+            scan_data, uid = read_scan_mhd(path)
+            if scan_data is None:
+                continue
+            slices, spacing, origin = get_data_mhd(scan_data)
 
-        video.clip(slices, settings.low_thresh, settings.high_thresh)
-        msk = mask.get_mask(slices, uid)
-        slices = video.normalize(slices, settings.low_thresh, settings.high_thresh)
-        mask.apply_mask(slices, msk)
-        slices, starts = trim(slices)
-        valid, flag = process_annotations(uid, annots, origin, labels, slices.shape, starts)
-        if not valid:
-            print('Ignoring %s - bad metadata' % path)
-            continue
+            video.clip(slices, settings.low_thresh, settings.high_thresh)
+            msk = mask.get_mask(slices, uid)
+            slices = video.normalize(slices, settings.low_thresh, settings.high_thresh)
+            mask.apply_mask(slices, msk)
+            slices, starts = trim(slices)
+            valid, flag = process_annotations(uid, annots, origin, labels, slices.shape, starts)
+            if not valid:
+                print('Ignoring %s - bad metadata' % path)
+                continue
+            video.write_data(slices, os.path.join(output_path, uid))
+            meta.loc[meta.shape[0]] = dict(uid=uid, flag=flag, z_len=slices.shape[0],
+                                           y_len=slices.shape[1], x_len=slices.shape[2])
+        else:
+            scan_data, uid = read_scan_dicom(path)
+            if scan_data is None:
+                continue
+            slices = get_pixels_hu_dicom(scan_data)
+            slices, spacing = resample_dicom(slices, scan_data)
+            video.clip(slices, settings.low_thresh, settings.high_thresh)
+            msk = mask.get_mask(slices, uid)
+            slices = video.normalize(slices, settings.low_thresh, settings.high_thresh)
+            mask.apply_mask(slices, msk)
+            slices, starts = trim(slices)
+            video.write_data(slices, os.path.join(output_path, uid))
+            flag = 0
+            meta.loc[meta.shape[0]] = dict(uid=uid, flag=flag, z_len=slices.shape[0],
+                                           y_len=slices.shape[1], x_len=slices.shape[2])
 
-        video.write_data(slices, os.path.join(output_path, uid))
-        meta.loc[meta.shape[0]] = dict(uid=uid, flag=flag, z_len=slices.shape[0],
-                                       y_len=slices.shape[1], x_len=slices.shape[2])
     return meta, labels
 
 
