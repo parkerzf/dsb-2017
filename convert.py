@@ -106,23 +106,23 @@ def get_data(scan_data):
     return slices, spacing, origin
 
 
-def trim(slices):
+def trim(slices, min_bound=0):
     starts = np.zeros(3, dtype=np.int32)
     end_vals = [slices.shape[i] for i in range(3)]
     ends = np.array(end_vals, dtype=np.int32)
 
-    while slices[starts[0]].sum() == 0:
+    while slices[starts[0]].sum() == min_bound*slices.shape[0]:
         starts[0] += 1
-    while slices[:, starts[1]].sum() == 0:
+    while slices[:, starts[1]].sum() == min_bound*slices.shape[1]:
         starts[1] += 1
-    while slices[..., starts[2]].sum() == 0:
+    while slices[..., starts[2]].sum() == min_bound*slices.shape[2]:
         starts[2] += 1
 
-    while slices[ends[0] - 1].sum() == 0:
+    while slices[ends[0] - 1].sum() == min_bound*slices.shape[0]:
         ends[0] -= 1
-    while slices[:, ends[1] - 1].sum() == 0:
+    while slices[:, ends[1] - 1].sum() == min_bound*slices.shape[1]:
         ends[1] -= 1
-    while slices[..., ends[2] - 1].sum() == 0:
+    while slices[..., ends[2] - 1].sum() == min_bound*slices.shape[2]:
         ends[2] -= 1
 
     trimmed = slices[starts[0]:ends[0], starts[1]:ends[1], starts[2]:ends[2]]
@@ -148,7 +148,8 @@ def convert(path_list, annots, batch_size, max_idx, idx):
         skip = 0
 
         video.clip(slices, settings.low_thresh, settings.high_thresh)
-        msk = mask.get_mask(slices, uid)
+        # msk = mask.get_mask(slices, uid)
+        msk = mask.segment_lung_mask(slices, uid)
         slices = video.normalize(slices, settings.low_thresh, settings.high_thresh)
         mask.apply_mask(slices, msk)
         slices, starts = trim(slices)

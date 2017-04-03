@@ -2,3 +2,4 @@ dsb/
 luna/
 .idea/
 *.pyc
+.ipynb_checkpoints/*
