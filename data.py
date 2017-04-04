@@ -62,8 +62,10 @@ class ChunkLoader(NervanaObject):
             # Host buffers for macrobatch data and targets
         self.data = np.empty((self.macrobatch_size, self.chunk_volume), dtype=datum_dtype)
         self.targets = np.empty((self.macrobatch_size, nclasses), dtype=np.float32)
+        self.starts = np.empty((self.macrobatch_size, 3), dtype=datum_dtype)
         self.minibatch_data = np.empty((self.bsz, self.chunk_volume), dtype=datum_dtype)
         self.minibatch_targets = np.empty((self.bsz, nclasses), dtype=np.float32)
+        self.minibatch_starts = np.empty((self.bsz, 3), dtype=datum_dtype)
         self.test_mode = test_mode
         # self.chunk_count = 0
         self.shape = (1, self.chunk_size, self.chunk_size, self.chunk_size)
@@ -72,6 +74,7 @@ class ChunkLoader(NervanaObject):
         # Device buffers for minibatch data and targets
         self.dev_data = self.be.empty((self.chunk_volume, self.bsz), dtype=self.be.default_dtype)
         self.dev_targets = self.be.empty((nclasses, self.bsz), dtype=self.be.default_dtype)
+        self.dev_starts = self.be.empty((3, self.bsz), dtype=self.be.default_dtype)
         self.current_uid = self.current_flag = self.current_meta = None
 
     def reset(self):
@@ -83,6 +86,7 @@ class ChunkLoader(NervanaObject):
     def next_macrobatch(self):
         curr_idx = 0
         self.targets[:] = 0
+        self.starts[:] = 0
         for idx in range(self.vids_per_macrobatch):
             vid_data = self.next_video()
             # self.chunk_count = self.chunks_per_vid
@@ -91,8 +95,8 @@ class ChunkLoader(NervanaObject):
             curr_idx += self.chunks_per_vid
             self.chunks_filled += self.chunks_per_vid
         self.chunks_left_in_macrobatch = self.macrobatch_size
-        # if self.is_training:
-        #     self.shuffle(self.data, self.targets)
+        if self.is_training:
+            self.shuffle(self.data, self.targets, self.starts)
 
     def next_minibatch(self, start):
         end = min(start + self.bsz, self.ndata)
@@ -112,12 +116,14 @@ class ChunkLoader(NervanaObject):
 
         self.minibatch_data[:] = self.data[start:end]
         self.minibatch_targets[:] = self.targets[start:end]
+        self.minibatch_starts[:] = self.starts[start:end]
         self.dev_data[:] = self.minibatch_data.T.copy()
         self.dev_data[:] = self.dev_data / 255.
         self.dev_targets[:] = self.minibatch_targets.T.copy()
+        self.dev_starts[:] = self.minibatch_starts.T.copy()
         self.macrobatch_offset += self.bsz
         self.chunks_left_in_macrobatch -= self.bsz
-        return uid, self.dev_data, self.dev_targets
+        return uid, self.dev_data, self.dev_targets, self.dev_starts
 
     def next_video(self):
         self.current_meta = self.metadata.iloc[self.video_idx]
@@ -204,6 +210,8 @@ class ChunkLoader(NervanaObject):
 
         chunk = self.slice_chunk(start, data)
 
+        self.starts[cur_idx + chunk_idx] = start
+
         if self.current_flag != -1:
             self.targets[cur_idx + chunk_idx, self.current_flag] = 1
 
@@ -242,8 +250,9 @@ class ChunkLoader(NervanaObject):
             if self.extract_one(cur_idx, chunk_idx, data, data_shape, uid_data):
                 chunk_idx += 1
 
-    def shuffle(self, data, targets):
+    def shuffle(self, data, targets, starts):
         inds = np.arange(self.data.shape[0])
         np.random.shuffle(inds)
         data[:] = data[inds]
         targets[:] = targets[inds]
+        starts[:] = starts[inds]

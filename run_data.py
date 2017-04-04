@@ -40,6 +40,8 @@ common = dict(datum_dtype=np.uint8, repo_dir=repo_dir, test_mode=args.test_mode)
 test = ChunkLoader(set_name='test', augment=not args.test_mode, **common)
 print "# batches", test.nbatches
 
-for uid, data, targets in test:
+for uid, data, targets, starts in test:
     print uid
+    print data.get()
     print targets.get()
+    print starts.get()
