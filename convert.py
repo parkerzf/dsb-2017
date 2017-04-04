@@ -148,8 +148,8 @@ def convert(path_list, annots, batch_size, max_idx, idx):
         skip = 0
 
         video.clip(slices, settings.low_thresh, settings.high_thresh)
-        # msk = mask.get_mask(slices, uid)
-        msk = mask.segment_lung_mask(slices, uid)
+        msk = mask.get_mask(slices, uid)
+        # msk = mask.segment_lung_mask(slices, uid)
         slices = video.normalize(slices, settings.low_thresh, settings.high_thresh)
         mask.apply_mask(slices, msk)
         slices, starts = trim(slices)
