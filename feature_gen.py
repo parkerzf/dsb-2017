@@ -11,8 +11,8 @@ import numpy as np
 def generate_spatial_agg_features(X, input_shape=(11, 11, 11, 256)):
     img_input = Input(shape=input_shape)
 
-    x = MaxPooling3D((3, 3, 3), strides=(3, 3, 3), name='block1_pool')(img_input)
-    # x = AveragePooling3D((3, 3, 3), strides=(3, 3, 3), name='block1_pool')(img_input)
+    x = MaxPooling3D((3, 3, 3), strides=(3, 3, 3), name='block1_pool', padding='same')(img_input)
+    # x = AveragePooling3D((3, 3, 3), strides=(3, 3, 3), name='block1_pool', padding='same')(img_input)
     x = Flatten(name='flatten')(x)
 
     model = Model(inputs=img_input, outputs=x)
