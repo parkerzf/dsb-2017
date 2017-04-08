@@ -6,6 +6,8 @@ import sklearn.metrics as metrics
 def predict():
     X_val = joblib.load('data/X_val.pkl')
     y_val = joblib.load('data/y_val.pkl')
+    # X_val = joblib.load('data/X_train.pkl')
+    # y_val = joblib.load('data/y_train.pkl')
 
     xgb = joblib.load('models/xgb.pkl')
 
